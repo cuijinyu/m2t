@@ -12,7 +12,7 @@
 ## 原理
 
 1. 通过[DHT协议](http://www.bittorrent.org/beps/bep_0005.html)找到拥有.torrent文件的peer；
-2. 通过[metadata协议](http://www.bittorrent.org/beps/bep_0009.html)从这些peer获取.torrent文件。
+2. 通过[BEP09](http://www.bittorrent.org/beps/bep_0009.html)从这些peer获取.torrent文件。
 
 ## 进度
 
