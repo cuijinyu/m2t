@@ -78,16 +78,6 @@ class MsgMaker:
         msg.update(msg_content)
         return msg
 
-    # def form_query_find_node(self, nid, target_id):
-    #     query = {
-    #         'q': 'find_node',
-    #         'a': {
-    #           'id': nid,
-    #           'target': target_id
-    #         }
-    #     }
-    #     return self.form_krpc_msg('q', query)
-
     def form_query_get_peers(self, nid, info_hash):
         query = {
             'q': 'get_peers',
