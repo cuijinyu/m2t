@@ -45,6 +45,7 @@ def create_socket(ip, port):
 
 
 class Node:
+
     def __init__(self, nid, ip, port):
         self.nid = nid
         self.ip = ip
@@ -58,13 +59,34 @@ class Node:
         return self.nid == other.nid
 
     def __str__(self):
-        return "<nid: %s, ip: %s, port: %s, queried: " % (self.nid, self.ip, self.port) + str(self.queried) + ">"
+        self.__repr__()
 
     def __repr__(self):
-        return "<nid: %s, ip: %s, port: %s, queried: " % (self.nid, self.ip, self.port) + str(self.queried) + ">"
+        return "node<nid: %s, ip: %s, port: %d, queried: " % (self.nid, self.ip, self.port) + str(self.queried) + ">"
+
+
+class Peer:
+
+    def __init__(self, ip, port):
+        self.addr = (ip, port)
+        self.asked = False
+
+    def __hash__(self):
+        return hash(self.addr)
+
+    def __eq__(self, other):
+        return self.addr == other.addr
+
+    def __str__(self):
+        return self.__repr__()
+
+    def __repr__(self):
+        ip, port = self.addr
+        return "peer<ip: %s, port: %d, asked: %s>" % (ip, port, self.asked)
 
 
 class MsgMaker:
+
     def __init__(self):
         pass
 
@@ -104,7 +126,7 @@ class MsgMaker:
                 'id': nid
             }
         }
-        return self.form_krpc_msg(response, tid)
+        return self.form_krpc_msg('r', response, tid)
 
     def form_response_ping(self, nid, tid):
         response = {
@@ -112,10 +134,11 @@ class MsgMaker:
                 'id': nid
             }
         }
-        return self.form_krpc_msg(response, tid)
+        return self.form_krpc_msg('r', response, tid)
 
 
 class DHTProtocolHandler:
+
     def __init__(self):
         self.mm = MsgMaker()
         self.s = create_socket("0.0.0.0", 6882)
@@ -123,8 +146,10 @@ class DHTProtocolHandler:
         self.info_hash = None
         self.nid = random_nid()
 
-        self.lock = Lock()
+        self.nodes_lock = Lock()
         self.nodes = set()
+
+        self.peers_lock = Lock()
         self.peers = set()
 
         self.tids = list()
@@ -187,51 +212,53 @@ class DHTProtocolHandler:
             self.on_response_get_peers(response)
             self.tids.remove(tid)
         else:
-            print('tid=%s not exist.' % tid)
+            print('tid=%s not exist.' % str(tid))
 
     def on_response_get_peers(self, response):
         if response.has_key('values'):
-            peers_count = len(self.peers)
             self.decode_peers(response['values'])
-            if peers_count == len(self.peers):
-                pass
-            # get metadata
         if response.has_key('nodes'):
             self.decode_nodes(response['nodes'])
 
     def decode_peers(self, peers):
         for peer in peers:
             ip = socket.inet_ntoa(peer[:4])
-            port, = struct.unpack('!H', peer[4:])
-            self.peers.add((ip, port))
+            port, = struct.unpack('>H', peer[4:])
+            self.peers_lock.acquire()
+            self.peers.add(Peer(ip, port))
+            self.peers_lock.release()
 
     def decode_nodes(self, nodes):
         for i in range(0, len(nodes), 26):
             nid = nodes[i:i + 20]
             ip = socket.inet_ntoa(nodes[i + 20:i + 24])
-            port, = struct.unpack('!H', nodes[i + 24:i + 26])
+            port, = struct.unpack('>H', nodes[i + 24:i + 26])
             node = Node(nid, ip, port)
-            self.lock.acquire()
+            self.nodes_lock.acquire()
             self.nodes.add(node)
-            self.lock.release()
+            self.nodes_lock.release()
 
     def msg_listener(self):
         while True:
             msg, addr = self.recv_msg()
-            y = msg['y']
-            if y == 'q':
-                self.on_query(msg['t'], msg['q'], addr)
-            elif y == 'r':
-                self.on_response(msg['t'], msg['r'])
-            elif y == 'e':
-                print(msg['e'])
-            else:
-                pass
+            try:
+                y = msg['y']
+                if y == 'q':
+                    self.on_query(msg['t'], msg['q'], addr)
+                elif y == 'r':
+                    self.on_response(msg['t'], msg['r'])
+                elif y == 'e':
+                    print(msg['e'])
+                else:
+                    pass
+            except:
+                print("no dht msg recved -> ", msg)
+
 
     def auto_get_peers(self):
         while True:
             send_count = 0
-            self.lock.acquire()
+            self.nodes_lock.acquire()
             for node in self.nodes:
                 if send_count >= 300:
                     break
@@ -239,11 +266,28 @@ class DHTProtocolHandler:
                     self.send_get_peers((node.ip, node.port))
                     node.queried += 1
                     send_count += 1
-            self.lock.release()
+            self.nodes_lock.release()
             time.sleep(1)
 
     def auto_get_metadata(self):
-        pass
+        md = MetadataDownloader()
+        while True:
+            self.peers_lock.acquire()
+            peers = self.peers.copy()
+            self.peers_lock.release()
+            for peer in peers:
+                if peer.asked == True:
+                    continue
+                print('try to get metadata from (%s, %d)' %peer.addr)
+                metadata = md.get_metadata(self.info_hash, peer.addr)
+                peer.asked = True
+                if metadata != None:
+                    # todo metadata got
+                    return
+            if len(peers) == len(self.peers):
+                for peer in peers:
+                    peer.asked = False
+            time.sleep(1)
 
     def run(self):
         auto_get_peers_thread = Thread(target=self.auto_get_peers)
@@ -254,10 +298,42 @@ class DHTProtocolHandler:
         msg_listener_thread.start()
 
 
-class PeerProtocolHandler:
+class MetadataDownloader:
 
     def __init__(self):
-        pass
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.s.settimeout(5)
+        self.peerid = random_nid()
+        self.info_hash = None
+
+    def get_metadata(self, info_hash, remote_peer):
+        self.info_hash = info_hash
+        try:
+            self.s.connect(remote_peer)
+            print('connect remote peer (%s, %d) succeed.' %remote_peer)
+            self.send_peer_handshake()
+            msg = self.recv_msg()
+            print(msg)
+        except:
+            print('connect remote peer (%s, %d) error.' %remote_peer)
+            self.s.close()
+            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.s.settimeout(5)
+            return
+
+    def send_msg(self, msg):
+        self.s.send(msg)
+
+    def recv_msg(self):
+        return self.s.recv(65535)
+
+    def send_peer_handshake(self):
+        msg = ''
+        msg += '\x13BitTorrent protocol'
+        msg += '\x00\x00\x00\x00\x00\x10\x00\x00'
+        msg += info_hash
+        msg += self.peerid
+        self.send_msg(msg)
 
 
 if __name__ == "__main__":
